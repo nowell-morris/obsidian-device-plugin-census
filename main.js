@@ -1,12 +1,19 @@
 'use strict';
-// Device Census: writes <folder>/<device>.md listing this device's plugins.
-// One note per device, so devices never edit the same file through Sync.
-const { Plugin, PluginSettingTab, Setting, Notice, Platform, TFile, Modal, requestUrl, normalizePath, apiVersion } = require('obsidian');
+// Device Plugin Census: each device writes <data folder>/<device>.md listing its
+// plugins (one note per device, so devices never edit the same file through Sync).
+// A dashboard note (Dataview) compares the devices. Optionally moves the config
+// folder to .obsidian-<device>.
+const { Plugin, PluginSettingTab, Setting, Notice, Platform, TFile, TFolder, Modal, requestUrl, normalizePath, apiVersion } = require('obsidian');
 
-const DEFAULTS = { folder: 'syncd-plugins/devices', staleHours: 6 };
-const NAME_KEY = 'device-census:device-name';      // per device, never synced
-const REPOS_KEY = 'device-census:repos';
-const OLD_KEY = 'device-census:old-config-dir';   // per device: folder we moved away from
+const DEFAULT_FOLDER = 'Device Plugin Census';
+const DEFAULT_DASHBOARD = 'Device Plugin Census.md';
+const STALE_HOURS = 6;
+const PREFIX = 'device-plugin-census:';
+const OLD_PREFIX = 'device-census:';               // keys from 1.x, read once
+const NAME_KEY = 'device-name';                    // per device, never synced
+const REPOS_KEY = 'repos';
+const OLD_DIR_KEY = 'old-config-dir';              // per device: folder we moved away from
+const NAME_FILES = ['device-plugin-census-name.txt', 'device-census-name.txt'];
 const REPOS_URL = 'https://raw.githubusercontent.com/obsidianmd/obsidian-releases/master/community-plugins.json';
 const REPOS_MAX_AGE = 7 * 24 * 3600 * 1000;
 
@@ -29,15 +36,83 @@ function platformName() {
   return 'unknown';
 }
 
-module.exports = class DeviceCensus extends Plugin {
+// Dashboard note created by the "Create dashboard note" command. The queries ask
+// the plugin for its data folder, so changing the folder later needs no edits here.
+const DASHBOARD = `---
+tags:
+  - device-plugin-census
+want_everywhere: []
+---
+# Device Plugin Census
+
+Every Obsidian plugin on every device. Each device running **Device Plugin Census** keeps its own note in the data folder; these tables (Dataview) compare them. Needs the **Dataview** plugin with JavaScript queries enabled.
+
+✅ enabled · ⏸ installed but off · — not installed
+
+## Devices
+
+\`\`\`dataviewjs
+const folder = app.plugins.plugins["device-plugin-census"]?.dataFolder?.() ?? "${DEFAULT_FOLDER}";
+const devs = dv.pages(\`"\${folder}"\`).where(p => p.device && p.census_version).sort(p => p.device);
+const ago = t => { if (!t) return ""; const h = (Date.now() - new Date(String(t)).getTime()) / 36e5;
+  return h < 1 ? "< 1 h ago" : h < 48 ? Math.round(h) + " h ago" : Math.round(h / 24) + " days ago"; };
+dv.table(["Device", "Platform", "Config folder", "Obsidian", "Last seen", "Enabled", "Installed"],
+  devs.map(p => [p.file.link, p.platform, "\`" + p.config_dir + "\`", p.obsidian_api, ago(p.last_seen), p.enabled_count, p.installed_count]));
+if (!devs.length) dv.paragraph("_No devices have reported yet._");
+\`\`\`
+
+## Wanted on every device
+
+Add plugin ids to \`want_everywhere\` in this note's properties.
+
+\`\`\`dataviewjs
+const folder = app.plugins.plugins["device-plugin-census"]?.dataFolder?.() ?? "${DEFAULT_FOLDER}";
+const devs = dv.pages(\`"\${folder}"\`).where(p => p.device && p.census_version).sort(p => p.device);
+const want = dv.current().want_everywhere || [];
+if (!want.length) dv.paragraph("_Nothing listed yet._");
+else dv.table(["Plugin", ...devs.map(d => d.device), "Not enabled on"], want.map(id => {
+  const st = devs.map(d => { const x = (d.plugins || []).find(p => p.id === id); return x ? (x.enabled ? "✅" : "⏸") : "—"; });
+  const any = devs.flatMap(d => d.plugins || []).find(p => p.id === id);
+  const missing = devs.filter((d, i) => st[i] !== "✅").map(d => d.device);
+  return [any ? any.name : id, ...st, missing.length ? missing.join(", ") : "everywhere ✓"];
+}));
+\`\`\`
+
+## Every plugin
+
+\`\`\`dataviewjs
+const folder = app.plugins.plugins["device-plugin-census"]?.dataFolder?.() ?? "${DEFAULT_FOLDER}";
+const devs = dv.pages(\`"\${folder}"\`).where(p => p.device && p.census_version).sort(p => p.device);
+const names = devs.map(d => d.device).array();
+const all = new Map();
+for (const d of devs) for (const p of (d.plugins || [])) {
+  const e = all.get(p.id) || { name: p.name, summary: p.summary, url: p.url, st: {} };
+  if (!e.url && p.url) e.url = p.url;
+  if (!e.summary && p.summary) e.summary = p.summary;
+  e.st[d.device] = p.enabled ? "✅" : "⏸";
+  all.set(p.id, e);
+}
+const link = u => !u ? "" : u.includes("github.com/") ? \`[\${u.replace(/^https:\\/\\/github\\.com\\//, "")}](\${u})\` : \`[site](\${u})\`;
+const rows = [...all.values()].sort((a, b) => a.name.localeCompare(b.name)).map(e => [
+  e.name, link(e.url), e.summary || "", ...names.map(n => e.st[n] || "—"),
+  \`\${names.filter(n => e.st[n] === "✅").length}/\${names.length}\`]);
+dv.paragraph(\`**\${rows.length} plugins across \${names.length} devices**\`);
+dv.table(["Plugin", "GitHub", "What it does", ...names, "On"], rows);
+\`\`\`
+`;
+
+module.exports = class DevicePluginCensus extends Plugin {
   async onload() {
-    this.settings = Object.assign({}, DEFAULTS, await this.loadData());
-    // Optional <configDir>/device-census-name.txt names a device that has no other
-    // way to set it (e.g. Obsidian in Docker, where the hostname is random).
-    try { this.fileName = slug((await this.app.vault.adapter.read(normalizePath(this.app.vault.configDir + '/device-census-name.txt'))).trim()); }
-    catch (e) { this.fileName = ''; }
+    this.settings = Object.assign({}, await this.loadData());   // only what the user set
+    this.fileName = '';
+    for (const f of NAME_FILES) {
+      try { this.fileName = slug((await this.app.vault.adapter.read(normalizePath(this.app.vault.configDir + '/' + f))).trim()); }
+      catch (e) { /* no file */ }
+      if (this.fileName) break;
+    }
     this.addSettingTab(new CensusSettings(this.app, this));
     this.addCommand({ id: 'update-now', name: 'Update this device now', callback: () => this.run(true) });
+    this.addCommand({ id: 'create-dashboard', name: 'Create dashboard note', callback: () => this.createDashboard() });
     this.addCommand({ id: 'move-config-folder', name: 'Move config folder to .obsidian-<device name> and restart', callback: () => this.moveConfig() });
     this.addCommand({ id: 'remove-old-config-folder', name: 'Delete the old config folder (after a move)', callback: () => this.removeOldConfig(false) });
     this.app.workspace.onLayoutReady(() => {
@@ -45,6 +120,35 @@ module.exports = class DeviceCensus extends Plugin {
       window.setTimeout(() => this.run(false), 15000);
       this.registerInterval(window.setInterval(() => this.run(false), 15 * 60 * 1000));
     });
+  }
+
+  // Per-device storage, with a one-time read of the 1.x key names.
+  local(key) {
+    const v = this.app.loadLocalStorage(PREFIX + key);
+    if (v !== null && v !== undefined) return v;
+    const old = this.app.loadLocalStorage(OLD_PREFIX + key);
+    return old === undefined ? null : old;
+  }
+  setLocal(key, v) { this.app.saveLocalStorage(PREFIX + key, v); }
+
+  // Data folder: the user's setting; else wherever other devices already write
+  // (so a new device joins them without being told); else the default.
+  dataFolder() {
+    if (this.settings.folder) return normalizePath(this.settings.folder);
+    const found = this.app.vault.getMarkdownFiles().find(f => {
+      const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
+      return fm && fm.census_version && fm.device && Array.isArray(fm.plugins);
+    });
+    return found && found.parent ? found.parent.path : DEFAULT_FOLDER;
+  }
+  dashboardPath() {
+    let p = (this.settings.dashboard || DEFAULT_DASHBOARD).trim();
+    if (!p.endsWith('.md')) p += '.md';
+    return normalizePath(p);
+  }
+  async saveSetting(key, value) {
+    if (value) this.settings[key] = value; else delete this.settings[key];
+    await this.saveData(this.settings);
   }
 
   defaultName() {
@@ -56,10 +160,34 @@ module.exports = class DeviceCensus extends Plugin {
     }
     return '';
   }
-  deviceName() { return slug(this.app.loadLocalStorage(NAME_KEY)) || this.defaultName(); }
-  setDeviceName(v) { this.app.saveLocalStorage(NAME_KEY, slug(v) || null); }
-
+  deviceName() { return slug(this.local(NAME_KEY)) || this.defaultName(); }
+  setDeviceName(v) { this.setLocal(NAME_KEY, slug(v) || null); }
   targetConfigDir() { const n = this.deviceName(); return n ? '.obsidian-' + n : ''; }
+
+  async ensureFolder(path) {
+    const parts = normalizePath(path).split('/');
+    for (let i = 1; i <= parts.length; i++) {
+      const p = parts.slice(0, i).join('/');
+      if (p && !this.app.vault.getAbstractFileByPath(p)) {
+        try { await this.app.vault.createFolder(p); } catch (e) { /* exists */ }
+      }
+    }
+  }
+
+  async createDashboard() {
+    const path = this.dashboardPath();
+    if (this.app.vault.getAbstractFileByPath(path)) {
+      new Notice(`Device Plugin Census: ${path} already exists, so it was left alone. Rename or delete it to create a fresh one.`, 12000);
+      return;
+    }
+    const dir = path.split('/').slice(0, -1).join('/');
+    if (dir) await this.ensureFolder(dir);
+    const file = await this.app.vault.create(path, DASHBOARD);
+    await this.app.workspace.getLeaf(true).openFile(file);
+    if (!this.app.plugins.enabledPlugins.has('dataview')) {
+      new Notice('Device Plugin Census: the dashboard needs the Dataview plugin, with JavaScript queries turned on.', 12000);
+    }
+  }
 
   async copyDir(src, dst) {
     const a = this.app.vault.adapter;
@@ -73,37 +201,37 @@ module.exports = class DeviceCensus extends Plugin {
   // (the same setting as Settings > Files and links > Override config folder), restart.
   async moveConfig() {
     const a = this.app.vault.adapter, cur = this.app.vault.configDir, target = this.targetConfigDir();
-    if (!target) { new Notice('Device Census: set a device name first (Settings → Device Census).', 10000); return; }
-    if (cur === target) { new Notice(`Device Census: already using ${target}.`); return; }
-    if (await a.exists(target)) { new Notice(`Device Census: ${target} already exists, so nothing was copied. Delete it or choose another device name.`, 15000); return; }
-    new Notice(`Device Census: copying ${cur} to ${target}…`, 8000);
+    if (!target) { new Notice('Device Plugin Census: set a device name first (in its settings).', 10000); return; }
+    if (cur === target) { new Notice(`Device Plugin Census: already using ${target}.`); return; }
+    if (await a.exists(target)) { new Notice(`Device Plugin Census: ${target} already exists, so nothing was copied. Delete it or choose another device name.`, 15000); return; }
+    new Notice(`Device Plugin Census: copying ${cur} to ${target}…`, 8000);
     try { await this.copyDir(cur, target); }
-    catch (e) { new Notice('Device Census: copy failed, nothing was switched. ' + e, 15000); return; }
-    this.app.saveLocalStorage(OLD_KEY, cur);
+    catch (e) { new Notice('Device Plugin Census: copy failed, nothing was switched. ' + e, 15000); return; }
+    this.setLocal(OLD_DIR_KEY, cur);
     window.localStorage.setItem(this.app.appId + '-config', target);
-    new Notice(`Device Census: restarting with ${target}. The old ${cur} is kept until you delete it.`, 8000);
+    new Notice(`Device Plugin Census: restarting with ${target}. The old ${cur} is kept until you delete it.`, 8000);
     window.setTimeout(() => window.location.reload(), 2500);
   }
 
   async removeOldConfig(skipConfirm) {
     const a = this.app.vault.adapter, cur = this.app.vault.configDir;
-    const old = this.app.loadLocalStorage(OLD_KEY) || '.obsidian';
-    if (old === cur || !/^\.obsidian/.test(old)) { new Notice(`Device Census: ${cur} is in use; nothing to delete.`); return; }
-    if (!(await a.exists(old))) { new Notice(`Device Census: ${old} is already gone.`); this.app.saveLocalStorage(OLD_KEY, null); return; }
-    const go = async () => { await a.rmdir(old, true); this.app.saveLocalStorage(OLD_KEY, null); new Notice(`Device Census: deleted ${old}.`); };
+    const old = this.local(OLD_DIR_KEY) || '.obsidian';
+    if (old === cur || !/^\.obsidian/.test(old)) { new Notice(`Device Plugin Census: ${cur} is in use; nothing to delete.`); return; }
+    if (!(await a.exists(old))) { new Notice(`Device Plugin Census: ${old} is already gone.`); this.setLocal(OLD_DIR_KEY, null); return; }
+    const go = async () => { await a.rmdir(old, true); this.setLocal(OLD_DIR_KEY, null); new Notice(`Device Plugin Census: deleted ${old}.`); };
     if (skipConfirm) return go();
     new ConfirmModal(this.app, `Delete ${old}?`, `This device now uses ${cur}. Check your plugins and theme look right first. ${old} will be deleted from this device only.`, go).open();
   }
 
   async repoMap() {
     let cache = null;
-    try { cache = JSON.parse(this.app.loadLocalStorage(REPOS_KEY) || 'null'); } catch (e) { cache = null; }
+    try { cache = JSON.parse(this.local(REPOS_KEY) || 'null'); } catch (e) { cache = null; }
     if (cache && Date.now() - cache.t < REPOS_MAX_AGE) return cache.m;
     try {
       const list = (await requestUrl({ url: REPOS_URL })).json;
       const m = {};
       for (const p of list) if (p.id && p.repo) m[p.id] = 'https://github.com/' + p.repo;
-      this.app.saveLocalStorage(REPOS_KEY, JSON.stringify({ t: Date.now(), m }));
+      this.setLocal(REPOS_KEY, JSON.stringify({ t: Date.now(), m }));
       return m;
     } catch (e) {
       return cache ? cache.m : {};   // offline: use the old list, or none
@@ -115,8 +243,7 @@ module.exports = class DeviceCensus extends Plugin {
     const out = {};
     try {
       const raw = await this.app.vault.adapter.read(normalizePath(this.app.vault.configDir + '/plugins/obsidian42-brat/data.json'));
-      const list = (JSON.parse(raw).pluginList || []);
-      for (const r of list) { const name = String(r).split('/').pop(); out[name] = 'https://github.com/' + r; }
+      for (const r of (JSON.parse(raw).pluginList || [])) out[String(r).split('/').pop()] = 'https://github.com/' + r;
     } catch (e) { /* BRAT not installed */ }
     return out;
   }
@@ -124,7 +251,7 @@ module.exports = class DeviceCensus extends Plugin {
   async run(manual) {
     const device = this.deviceName();
     if (!device) {
-      new Notice('Device Census: set a device name in its settings (Settings → Device Census).', 10000);
+      new Notice('Device Plugin Census: set a device name in its settings.', 10000);
       return;
     }
     const pm = this.app.plugins;
@@ -137,7 +264,7 @@ module.exports = class DeviceCensus extends Plugin {
       version: m.version || '',
       enabled: enabled.has(m.id),
       summary: summarize(m.description),
-      url: repos[m.id] || brat[m.id] || m.authorUrl || '',
+      url: repos[m.id] || brat[m.id] || brat[m.id.replace(/^obsidian-/, '')] || m.authorUrl || '',
     })).sort((a, b) => a.name.localeCompare(b.name));
 
     const on = plugins.filter(p => p.enabled), off = plugins.filter(p => !p.enabled);
@@ -151,8 +278,7 @@ module.exports = class DeviceCensus extends Plugin {
       'enabled_count: ' + on.length,
       'installed_count: ' + plugins.length,
       'tags:',
-      '  - obsidian/plugins',
-      '  - device-census',
+      '  - device-plugin-census',
       'plugins:',
       ...plugins.map(p => '  - ' + JSON.stringify(p)),
     ];
@@ -160,12 +286,13 @@ module.exports = class DeviceCensus extends Plugin {
       ...ps.map(p => `| ${cell(p.name)} | ${cell(p.summary)} | ${cell(p.version)} | ${p.url ? `[link](${p.url})` : ''} |`)].join('\n');
     const body = [
       `# ${device}`, '',
-      `Written automatically by the Device Census plugin on this device. Don't edit by hand: it's rewritten when something changes.`, '',
+      `Written automatically by Device Plugin Census on this device. Don't edit by hand: it's rewritten when something changes.`, '',
       `## Enabled (${on.length})`, '', table(on), '',
       `## Installed but off (${off.length})`, '', off.length ? table(off) : '_None._', '',
     ].join('\n');
 
-    const path = normalizePath(`${this.settings.folder}/${device}.md`);
+    const folder = this.dataFolder();
+    const path = normalizePath(`${folder}/${device}.md`);
     const stamp = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
     const content = (last) => [...fm, 'last_seen: ' + last, '---', '', body].join('\n');
 
@@ -175,17 +302,14 @@ module.exports = class DeviceCensus extends Plugin {
       const m = old.match(/^last_seen: (.+)$/m);
       const last = m ? m[1].trim() : '';
       const unchanged = last && old === content(last);
-      const fresh = last && (Date.now() - Date.parse(last)) < this.settings.staleHours * 3600 * 1000;
+      const fresh = last && (Date.now() - Date.parse(last)) < STALE_HOURS * 3600 * 1000;
       if (unchanged && fresh && !manual) return;   // avoid Sync churn
       await this.app.vault.modify(existing, content(stamp));
     } else {
-      const folder = normalizePath(this.settings.folder);
-      if (!this.app.vault.getAbstractFileByPath(folder)) {
-        try { await this.app.vault.createFolder(folder); } catch (e) { /* exists */ }
-      }
+      await this.ensureFolder(folder);
       await this.app.vault.create(path, content(stamp));
     }
-    if (manual) new Notice(`Device Census: updated ${path}`);
+    if (manual) new Notice(`Device Plugin Census: updated ${path}`);
   }
 };
 
@@ -204,30 +328,36 @@ class ConfirmModal extends Modal {
 class CensusSettings extends PluginSettingTab {
   constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
   display() {
-    const { containerEl } = this;
+    const { containerEl } = this, p = this.plugin;
     containerEl.empty();
     new Setting(containerEl)
       .setName('Device name')
-      .setDesc(`Stored on this device only. Default comes from the config folder (.obsidian-<name>), a device-census-name.txt file in it, or the computer's hostname. Current config folder: ${this.app.vault.configDir}`)
-      .addText(t => t.setPlaceholder(this.plugin.defaultName() || 'e.g. pixel9pro')
-        .setValue(this.app.loadLocalStorage(NAME_KEY) || '')
-        .onChange(v => this.plugin.setDeviceName(v)));
+      .setDesc(`Stored on this device only. If empty, it comes from the config folder (.obsidian-<name>), a device-plugin-census-name.txt file in it, or the computer's hostname. Now: ${p.deviceName() || '(none, please set one)'}`)
+      .addText(t => t.setPlaceholder(p.defaultName() || 'e.g. pixel9pro')
+        .setValue(p.local(NAME_KEY) || '')
+        .onChange(v => p.setDeviceName(v)));
     new Setting(containerEl)
-      .setName('Folder for device notes')
-      .addText(t => t.setValue(this.plugin.settings.folder).onChange(async v => {
-        this.plugin.settings.folder = v.trim() || DEFAULTS.folder; await this.plugin.saveData(this.plugin.settings);
-      }));
-    const target = this.plugin.targetConfigDir();
+      .setName('Data folder')
+      .setDesc(`Where each device writes its note. If empty, a new device uses the folder other devices already write to, or "${DEFAULT_FOLDER}". Now: ${p.dataFolder()}`)
+      .addText(t => t.setPlaceholder(p.dataFolder()).setValue(p.settings.folder || '')
+        .onChange(v => p.saveSetting('folder', v.trim())));
+    new Setting(containerEl)
+      .setName('Dashboard note')
+      .setDesc('Path of the dashboard note that compares devices (needs Dataview). Create makes it if it doesn\'t exist; an existing note is never overwritten.')
+      .addText(t => t.setPlaceholder(DEFAULT_DASHBOARD).setValue(p.settings.dashboard || '')
+        .onChange(v => p.saveSetting('dashboard', v.trim())))
+      .addButton(b => b.setButtonText('Create').onClick(() => p.createDashboard()));
+    const target = p.targetConfigDir();
     new Setting(containerEl)
       .setName('Config folder')
       .setDesc(this.app.vault.configDir === target
         ? `Using ${target}.`
         : `Using ${this.app.vault.configDir}. Move copies it to ${target || '.obsidian-<device name>'}, switches Obsidian to the copy and restarts. The old folder stays until you delete it.`)
-      .addButton(b => b.setButtonText('Move and restart').setDisabled(!target || this.app.vault.configDir === target).onClick(() => this.plugin.moveConfig()))
-      .addButton(b => b.setButtonText('Delete old folder').onClick(() => this.plugin.removeOldConfig(false)));
+      .addButton(b => b.setButtonText('Move and restart').setDisabled(!target || this.app.vault.configDir === target).onClick(() => p.moveConfig()))
+      .addButton(b => b.setButtonText('Delete old folder').onClick(() => p.removeOldConfig(false)));
     new Setting(containerEl)
       .setName('Update now')
-      .setDesc(`Writes ${this.plugin.settings.folder}/${this.plugin.deviceName() || '<device>'}.md`)
-      .addButton(b => b.setButtonText('Update').onClick(() => this.plugin.run(true)));
+      .setDesc(`Writes ${p.dataFolder()}/${p.deviceName() || '<device>'}.md`)
+      .addButton(b => b.setButtonText('Update').onClick(() => p.run(true)));
   }
 }
