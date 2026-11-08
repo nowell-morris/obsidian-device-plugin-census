@@ -41,6 +41,7 @@ function platformName() {
 const DASHBOARD = `---
 tags:
   - device-plugin-census
+census_dashboard: true
 want_everywhere: []
 ---
 # Device Plugin Census
@@ -99,6 +100,14 @@ const rows = [...all.values()].sort((a, b) => a.name.localeCompare(b.name)).map(
 dv.paragraph(\`**\${rows.length} plugins across \${names.length} devices**\`);
 dv.table(["Plugin", "GitHub", "What it does", ...names, "On"], rows);
 \`\`\`
+
+## Adding a device
+
+1. Install **BRAT** from Community plugins, then BRAT → *Add beta plugin* → \`nowell-morris/obsidian-device-plugin-census\`.
+2. Enable **Device Plugin Census** and set the device name in its settings (phones and tablets need this once).
+3. Optional: **Move and restart** in its settings gives the device its own config folder, \`.obsidian-<device name>\`. Afterwards **Delete old folder** removes the original.
+
+The device shows up here within about 15 seconds of Obsidian starting.
 `;
 
 module.exports = class DevicePluginCensus extends Plugin {
@@ -174,7 +183,27 @@ module.exports = class DevicePluginCensus extends Plugin {
     }
   }
 
-  async createDashboard() {
+  // The dashboard is recognised by its census_dashboard property, wherever it is,
+  // so renaming or moving it never leads to a second one.
+  dashboardExists() {
+    if (this.app.vault.getAbstractFileByPath(this.dashboardPath())) return true;
+    return this.app.vault.getMarkdownFiles().some(f => this.app.metadataCache.getFileCache(f)?.frontmatter?.census_dashboard);
+  }
+
+  async autoDashboard(firstRun) {
+    if (this.settings.autoDashboard === false || this.dashboardExists()) return;
+    // Other devices already report: on this start, give Sync time to bring in their
+    // dashboard before making one (the next check is 15 minutes later).
+    const me = this.deviceName();
+    const others = this.app.vault.getMarkdownFiles().some(f => {
+      const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
+      return fm && fm.census_version && fm.device && fm.device !== me;
+    });
+    if (firstRun && others) return;
+    await this.createDashboard(false);
+  }
+
+  async createDashboard(open = true) {
     const path = this.dashboardPath();
     if (this.app.vault.getAbstractFileByPath(path)) {
       new Notice(`Device Plugin Census: ${path} already exists, so it was left alone. Rename or delete it to create a fresh one.`, 12000);
@@ -183,6 +212,7 @@ module.exports = class DevicePluginCensus extends Plugin {
     const dir = path.split('/').slice(0, -1).join('/');
     if (dir) await this.ensureFolder(dir);
     const file = await this.app.vault.create(path, DASHBOARD);
+    if (!open) { new Notice(`Device Plugin Census: created the dashboard, ${path}.`, 8000); return; }
     await this.app.workspace.getLeaf(true).openFile(file);
     if (!this.app.plugins.enabledPlugins.has('dataview')) {
       new Notice('Device Plugin Census: the dashboard needs the Dataview plugin, with JavaScript queries turned on.', 12000);
@@ -303,13 +333,15 @@ module.exports = class DevicePluginCensus extends Plugin {
       const last = m ? m[1].trim() : '';
       const unchanged = last && old === content(last);
       const fresh = last && (Date.now() - Date.parse(last)) < STALE_HOURS * 3600 * 1000;
-      if (unchanged && fresh && !manual) return;   // avoid Sync churn
-      await this.app.vault.modify(existing, content(stamp));
+      if (!(unchanged && fresh && !manual)) await this.app.vault.modify(existing, content(stamp));   // else: avoid Sync churn
     } else {
       await this.ensureFolder(folder);
       await this.app.vault.create(path, content(stamp));
     }
     if (manual) new Notice(`Device Plugin Census: updated ${path}`);
+    const firstRun = !this.ranOnce && !manual;
+    this.ranOnce = true;
+    await this.autoDashboard(firstRun);
   }
 };
 
@@ -347,6 +379,11 @@ class CensusSettings extends PluginSettingTab {
       .addText(t => t.setPlaceholder(DEFAULT_DASHBOARD).setValue(p.settings.dashboard || '')
         .onChange(v => p.saveSetting('dashboard', v.trim())))
       .addButton(b => b.setButtonText('Create').onClick(() => p.createDashboard()));
+    new Setting(containerEl)
+      .setName('Create the dashboard automatically')
+      .setDesc('If no dashboard note exists anywhere in the vault, create one. It is recognised by its census_dashboard property, so renaming or moving it is fine.')
+      .addToggle(t => t.setValue(p.settings.autoDashboard !== false)
+        .onChange(async v => { p.settings.autoDashboard = v; await p.saveData(p.settings); }));
     const target = p.targetConfigDir();
     new Setting(containerEl)
       .setName('Config folder')
