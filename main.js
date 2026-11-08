@@ -13,6 +13,7 @@ const OLD_PREFIX = 'device-census:';               // keys from 1.x, read once
 const NAME_KEY = 'device-name';                    // per device, never synced
 const REPOS_KEY = 'repos';
 const OLD_DIR_KEY = 'old-config-dir';              // per device: folder we moved away from
+const SETUP_KEY = 'setup-done';                    // per device: user confirmed name and folder
 const NAME_FILES = ['device-plugin-census-name.txt', 'device-census-name.txt'];
 const REPOS_URL = 'https://raw.githubusercontent.com/obsidianmd/obsidian-releases/master/community-plugins.json';
 const REPOS_MAX_AGE = 7 * 24 * 3600 * 1000;
@@ -165,10 +166,46 @@ module.exports = class DevicePluginCensus extends Plugin {
     if (m) return slug(m[1]);
     if (this.fileName) return this.fileName;
     if (Platform.isDesktopApp) {
-      try { return slug(require('os').hostname().split('.')[0]); } catch (e) { /* ignore */ }
+      try { const h = slug(require('os').hostname().split('.')[0]); if (h) return h; } catch (e) { /* ignore */ }
     }
-    return '';
+    const s = this.syncNames();
+    return s.set || s.auto || '';
   }
+  // Obsidian Sync's "Device name" setting (and its default, e.g. the phone model).
+  syncNames() {
+    try {
+      const inst = this.app.internalPlugins?.getPluginById?.('sync')?.instance;
+      if (!inst) return {};
+      let auto = '';
+      try { auto = slug(inst.getDefaultDeviceName?.()); } catch (e) { /* ignore */ }
+      return { set: slug(inst.deviceName), auto };
+    } catch (e) { return {}; }
+  }
+  syncEnabled() {
+    try { return !!this.app.internalPlugins?.getPluginById?.('sync')?.enabled; } catch (e) { return false; }
+  }
+
+  // Everything the vault already holds from other devices.
+  survey() {
+    const notes = [], dashboards = [];
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
+      if (!fm) continue;
+      if (fm.census_dashboard) dashboards.push(f.path);
+      if (fm.census_version && fm.device && Array.isArray(fm.plugins))
+        notes.push({ device: String(fm.device), platform: fm.platform || '', last: fm.last_seen || '', folder: f.parent ? f.parent.path : '', path: f.path });
+    }
+    notes.sort((a, b) => a.device.localeCompare(b.device));
+    const folders = [...new Set(notes.map(n => n.folder))];
+    return { notes, dashboards, folders };
+  }
+  // A device counts as set up once it confirmed, or once its own note exists.
+  isSetUp() {
+    if (this.local(SETUP_KEY)) return true;
+    const n = this.deviceName();
+    return !!(n && this.app.vault.getAbstractFileByPath(normalizePath(`${this.dataFolder()}/${n}.md`)));
+  }
+  openSetup() { new SetupModal(this.app, this).open(); }
   deviceName() { return slug(this.local(NAME_KEY)) || this.defaultName(); }
   setDeviceName(v) { this.setLocal(NAME_KEY, slug(v) || null); }
   targetConfigDir() { const n = this.deviceName(); return n ? '.obsidian-' + n : ''; }
@@ -279,6 +316,12 @@ module.exports = class DevicePluginCensus extends Plugin {
   }
 
   async run(manual) {
+    // A new device writes nothing until the user has seen what's already in the
+    // vault and confirmed its name and folder.
+    if (!this.isSetUp()) {
+      if (manual || !this.setupShown) { this.setupShown = true; this.openSetup(); }
+      return;
+    }
     const device = this.deviceName();
     if (!device) {
       new Notice('Device Plugin Census: set a device name in its settings.', 10000);
@@ -357,14 +400,82 @@ class ConfirmModal extends Modal {
   onClose() { this.contentEl.empty(); }
 }
 
+class SetupModal extends Modal {
+  constructor(app, plugin) { super(app); this.p = plugin; this.name = ''; this.folder = ''; }
+  onOpen() { this.render(); }
+  render() {
+    const p = this.p, c = this.contentEl, s = p.survey();
+    c.empty();
+    this.titleEl.setText('Device Plugin Census: set up this device');
+    c.createEl('p', { text: "Before writing anything, here is what's already in this vault." });
+
+    if (s.notes.length) {
+      c.createEl('p', { text: `Devices already reporting (${s.notes.length}):` });
+      const ul = c.createEl('ul');
+      for (const n of s.notes) ul.createEl('li', { text: `${n.device} (${n.platform || '?'}), last seen ${n.last || '?'}, in ${n.folder || '/'}` });
+    } else {
+      const w = c.createEl('p');
+      w.createEl('strong', { text: 'No other devices found. ' });
+      w.appendText(p.syncEnabled()
+        ? "Obsidian Sync is on but may not have finished downloading. Wait until it's done, then press Check again."
+        : 'If this vault is synced some other way, wait for it to finish, then press Check again. Otherwise this device starts a new census.');
+    }
+    c.createEl('p', { text: s.dashboards.length ? `Dashboard: ${s.dashboards.join(', ')}` : `Dashboard: none yet${p.settings.autoDashboard === false ? '' : ` (one will be created at ${p.dashboardPath()})`}.` });
+
+    // Name: suggestions from what this device and the vault already know.
+    if (!this.name) this.name = p.deviceName();
+    const sn = p.syncNames();
+    const sugg = [...new Set([p.deviceName(), p.defaultName(), p.fileName, sn.set, sn.auto, ...s.notes.map(n => n.device)].filter(Boolean))];
+    const nameSet = new Setting(c).setName('Device name')
+      .setDesc('Used for the note name and the config folder (.obsidian-<name>). Pick an existing device only if this is that device reinstalled.')
+      .addText(t => t.setPlaceholder('e.g. pixel9pro').setValue(this.name).onChange(v => { this.name = slug(v); warn(); }));
+    const sg = c.createDiv();
+    for (const n of sugg) {
+      const b = sg.createEl('button', { text: n });
+      b.style.marginRight = '6px';
+      b.onclick = () => { this.name = n; this.render(); };
+    }
+    const warnEl = c.createEl('p');
+    const warn = () => {
+      const taken = s.notes.find(n => n.device === this.name);
+      warnEl.setText(taken ? `Note: ${this.name} already reports from ${taken.platform || 'another device'}; this device would take over its note.` : '');
+    };
+    warn();
+
+    // Folder: the setting, else where others write, else the default.
+    if (!this.folder) this.folder = p.settings.folder || s.folders[0] || DEFAULT_FOLDER;
+    const opts = [...new Set([this.folder, ...s.folders, DEFAULT_FOLDER])];
+    new Setting(c).setName('Data folder')
+      .setDesc(s.folders.length > 1 ? 'Devices are writing to more than one folder; pick one.' : 'Where each device writes its note.')
+      .addDropdown(d => { for (const o of opts) d.addOption(o, o); d.setValue(this.folder).onChange(v => { this.folder = v; }); });
+
+    new Setting(c)
+      .addButton(b => b.setButtonText('Check again').onClick(() => this.render()))
+      .addButton(b => b.setButtonText('Not now').onClick(() => this.close()))
+      .addButton(b => b.setButtonText('Confirm and write').setCta().onClick(async () => {
+        if (!this.name) { new Notice('Device Plugin Census: enter a device name.'); return; }
+        if (this.name !== p.defaultName()) p.setDeviceName(this.name);
+        await p.saveSetting('folder', this.folder);
+        p.setLocal(SETUP_KEY, '1');
+        this.close();
+        await p.run(true);
+      }));
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
 class CensusSettings extends PluginSettingTab {
   constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
   display() {
     const { containerEl } = this, p = this.plugin;
     containerEl.empty();
+    if (!p.isSetUp()) new Setting(containerEl)
+      .setName('Set up this device')
+      .setDesc("This device hasn't written its note yet. Setup shows what's already in the vault before anything is written.")
+      .addButton(b => b.setButtonText('Set up').setCta().onClick(() => p.openSetup()));
     new Setting(containerEl)
       .setName('Device name')
-      .setDesc(`Stored on this device only. If empty, it comes from the config folder (.obsidian-<name>), a device-plugin-census-name.txt file in it, or the computer's hostname. Now: ${p.deviceName() || '(none, please set one)'}`)
+      .setDesc(`Stored on this device only. If empty, it comes from the config folder (.obsidian-<name>), a device-plugin-census-name.txt file in it, the computer's hostname, or Obsidian Sync's device name. Now: ${p.deviceName() || '(none, please set one)'}`)
       .addText(t => t.setPlaceholder(p.defaultName() || 'e.g. pixel9pro')
         .setValue(p.local(NAME_KEY) || '')
         .onChange(v => p.setDeviceName(v)));

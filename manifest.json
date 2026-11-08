@@ -1,7 +1,7 @@
 {
   "id": "device-plugin-census",
   "name": "Device Plugin Census",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "minAppVersion": "1.4.0",
   "description": "Each device writes its installed and enabled plugins to a note, and a dashboard compares devices. Can also move the config folder to .obsidian-<device>.",
   "author": "Nowell Morris",

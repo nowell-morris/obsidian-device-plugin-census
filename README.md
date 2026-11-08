@@ -4,6 +4,7 @@ See which plugins are installed and enabled on each of your devices, side by sid
 
 ## How it works
 
+- **A new device checks first.** Until a device has written its note, the plugin writes nothing. It opens a setup window listing the devices already reporting, the folder they use and the dashboard, suggests a name (from the config folder, hostname or Obsidian Sync's device name), and waits for you to confirm. If it finds nothing, it says so, so you can wait for sync to finish and press *Check again*. Devices that already have a note skip this.
 - **Each device writes its own note** into a data folder (default `Device Plugin Census/`), named after the device: every installed plugin with its version, whether it's enabled, a short summary and its GitHub link. It runs on every start and every 15 minutes while Obsidian is open, and only rewrites the note when something changed (or every 6 hours to refresh `last_seen`). Devices never edit the same file, so sync never conflicts.
 - **A dashboard note compares the devices.** The plugin creates it the first time it runs, at the path in settings (default `Device Plugin Census.md`): a devices table, a "wanted on every device" checklist, and a table of every plugin with one column per device. It needs the **Dataview** plugin with JavaScript queries enabled. It's recognised by its `census_dashboard` property, so you can rename, move and edit it freely; the plugin never overwrites it or makes a second one. (When other devices already report, a newly installed device waits 15 minutes before creating one, so sync can bring the existing dashboard in first.) *Create dashboard note* makes one on demand, and the automatic creation can be turned off.
 - The plugin list is also in each device note's properties (`plugins:`), if you'd rather build your own views.
@@ -12,11 +13,11 @@ See which plugins are installed and enabled on each of your devices, side by sid
 
 | Setting | Stored | Default |
 |---|---|---|
-| Device name | on this device only | config folder `.obsidian-<name>`, a `device-plugin-census-name.txt` file in it, or the hostname (desktop) |
+| Device name | on this device only | config folder `.obsidian-<name>`, a `device-plugin-census-name.txt` file in it, the hostname (desktop), or Obsidian Sync's device name |
 | Data folder | plugin settings | the folder other devices already write to, else `Device Plugin Census` |
 | Dashboard note | plugin settings | `Device Plugin Census.md` |
 
-Phones and tablets need a device name set once. A new device finds an existing data folder by itself, even if plugin settings don't sync.
+Phones and tablets confirm a device name once, in the setup window. A new device finds an existing data folder by itself, even if plugin settings don't sync.
 
 ## Per-device config folders (optional)
 
@@ -26,7 +27,7 @@ With Obsidian Sync every device can keep its own settings in its own config fold
 
 1. Install **BRAT** from Community plugins.
 2. BRAT → *Add beta plugin* → `nowell-morris/obsidian-device-plugin-census`.
-3. Enable **Device Plugin Census**, set the device name, and create the dashboard on one device.
+3. Enable **Device Plugin Census**. After sync has finished, confirm the name and folder in the setup window (or Settings → Device Plugin Census → *Set up*).
 
 ## Network use
 
