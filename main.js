@@ -24,7 +24,10 @@ const cell = s => String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/\s*\
 
 function summarize(desc) {
   if (!desc) return '';
-  let s = String(desc).replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s/)[0].replace(/[.!]$/, '');
+  // First sentence. No lookbehind: older iOS (before 16.4) can't parse it.
+  let s = String(desc).replace(/\s+/g, ' ').trim();
+  const first = s.match(/^.*?[.!?](?= )/);
+  s = (first ? first[0] : s).replace(/[.!]$/, '');
   const w = s.split(' ');
   return w.length > 10 ? w.slice(0, 10).join(' ') + '…' : s;
 }
@@ -506,7 +509,7 @@ class SetupModal extends Modal {
     const sugg = [...new Set([p.deviceName(), p.defaultName(), p.fileName, sn.set, sn.auto, ...s.notes.map(n => n.device)].filter(Boolean))];
     const nameSet = new Setting(c).setName('Device name')
       .setDesc('Used for the note name and the config folder (.obsidian-<name>). Pick an existing device only if this is that device reinstalled.')
-      .addText(t => t.setPlaceholder('e.g. pixel9pro').setValue(this.name).onChange(v => { this.name = slug(v); warn(); }));
+      .addText(t => t.setPlaceholder('e.g. my-android-phone').setValue(this.name).onChange(v => { this.name = slug(v); warn(); }));
     const sg = c.createDiv();
     for (const n of sugg) {
       const b = sg.createEl('button', { text: n });
@@ -554,7 +557,7 @@ class CensusSettings extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Device name')
       .setDesc(`Stored on this device only. If empty, it comes from the config folder (.obsidian-<name>), a device-plugin-census-name.txt file in it, the computer's hostname, or Obsidian Sync's device name. Now: ${p.deviceName() || '(none, please set one)'}`)
-      .addText(t => t.setPlaceholder(p.defaultName() || 'e.g. pixel9pro')
+      .addText(t => t.setPlaceholder(p.defaultName() || 'e.g. my-android-phone')
         .setValue(p.local(NAME_KEY) || '')
         .onChange(v => p.setDeviceName(v)));
     new Setting(containerEl)
