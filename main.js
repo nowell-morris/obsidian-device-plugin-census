@@ -7,6 +7,7 @@ const { Plugin, PluginSettingTab, Setting, Notice, Platform, TFile, TFolder, Mod
 
 const DEFAULT_FOLDER = 'Device Plugin Census';
 const DEFAULT_DASHBOARD = 'Device Plugin Census.md';
+const DEFAULT_REMOVED = 'Removed Plugins.md';
 const STALE_HOURS = 6;
 const PREFIX = 'device-plugin-census:';
 const OLD_PREFIX = 'device-census:';               // keys from 1.x, read once
@@ -28,6 +29,9 @@ function summarize(desc) {
   return w.length > 10 ? w.slice(0, 10).join(' ') + '…' : s;
 }
 
+const isMobilePlatform = p => /^(android|ipad|iphone)/.test(String(p || ''));
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+
 function platformName() {
   if (Platform.isAndroidApp) return Platform.isTablet ? 'android-tablet' : 'android-phone';
   if (Platform.isIosApp) return Platform.isTablet ? 'ipad' : 'iphone';
@@ -39,7 +43,7 @@ function platformName() {
 
 // Dashboard note created by the "Create dashboard note" command. The queries ask
 // the plugin for its data folder, so changing the folder later needs no edits here.
-const DASHBOARD = `---
+const dashboardText = removedLink => `---
 tags:
   - device-plugin-census
 census_dashboard: true
@@ -49,7 +53,9 @@ want_everywhere: []
 
 Every Obsidian plugin on every device. Each device running **Device Plugin Census** keeps its own note in the data folder; these tables (Dataview) compare them. Needs the **Dataview** plugin with JavaScript queries enabled.
 
-✅ enabled · ⏸ installed but off · — not installed
+✅ enabled · ⏸ installed but off · — not installed · 🖥 desktop only (n/a on phones and tablets)
+
+Plugins removed from a device, and why: [[${removedLink}]]
 
 ## Devices
 
@@ -71,12 +77,14 @@ Add plugin ids to \`want_everywhere\` in this note's properties.
 const folder = app.plugins.plugins["device-plugin-census"]?.dataFolder?.() ?? "${DEFAULT_FOLDER}";
 const devs = dv.pages(\`"\${folder}"\`).where(p => p.device && p.census_version).sort(p => p.device);
 const want = dv.current().want_everywhere || [];
+const mobile = d => /^(android|ipad|iphone)/.test(String(d.platform || ""));
 if (!want.length) dv.paragraph("_Nothing listed yet._");
 else dv.table(["Plugin", ...devs.map(d => d.device), "Not enabled on"], want.map(id => {
-  const st = devs.map(d => { const x = (d.plugins || []).find(p => p.id === id); return x ? (x.enabled ? "✅" : "⏸") : "—"; });
   const any = devs.flatMap(d => d.plugins || []).find(p => p.id === id);
-  const missing = devs.filter((d, i) => st[i] !== "✅").map(d => d.device);
-  return [any ? any.name : id, ...st, missing.length ? missing.join(", ") : "everywhere ✓"];
+  const desk = !!(any && any.desktop_only);
+  const st = devs.map(d => { const x = (d.plugins || []).find(p => p.id === id); return x ? (x.enabled ? "✅" : "⏸") : (desk && mobile(d) ? "n/a" : "—"); });
+  const missing = devs.filter((d, i) => st[i] !== "✅" && st[i] !== "n/a").map(d => d.device);
+  return [(any ? any.name : id) + (desk ? " 🖥" : ""), ...st, missing.length ? missing.join(", ") : "everywhere ✓"];
 }));
 \`\`\`
 
@@ -86,18 +94,23 @@ else dv.table(["Plugin", ...devs.map(d => d.device), "Not enabled on"], want.map
 const folder = app.plugins.plugins["device-plugin-census"]?.dataFolder?.() ?? "${DEFAULT_FOLDER}";
 const devs = dv.pages(\`"\${folder}"\`).where(p => p.device && p.census_version).sort(p => p.device);
 const names = devs.map(d => d.device).array();
+const mob = new Set(devs.filter(d => /^(android|ipad|iphone)/.test(String(d.platform || ""))).map(d => d.device).array());
 const all = new Map();
 for (const d of devs) for (const p of (d.plugins || [])) {
-  const e = all.get(p.id) || { name: p.name, summary: p.summary, url: p.url, st: {} };
+  const e = all.get(p.id) || { name: p.name, summary: p.summary, url: p.url, desk: false, st: {} };
   if (!e.url && p.url) e.url = p.url;
   if (!e.summary && p.summary) e.summary = p.summary;
+  if (p.desktop_only) e.desk = true;
   e.st[d.device] = p.enabled ? "✅" : "⏸";
   all.set(p.id, e);
 }
 const link = u => !u ? "" : u.includes("github.com/") ? \`[\${u.replace(/^https:\\/\\/github\\.com\\//, "")}](\${u})\` : \`[site](\${u})\`;
-const rows = [...all.values()].sort((a, b) => a.name.localeCompare(b.name)).map(e => [
-  e.name, link(e.url), e.summary || "", ...names.map(n => e.st[n] || "—"),
-  \`\${names.filter(n => e.st[n] === "✅").length}/\${names.length}\`]);
+const rows = [...all.values()].sort((a, b) => a.name.localeCompare(b.name)).map(e => {
+  const can = names.filter(n => !(e.desk && mob.has(n)));
+  return [e.name + (e.desk ? " 🖥" : ""), link(e.url), e.summary || "",
+    ...names.map(n => e.st[n] || (e.desk && mob.has(n) ? "n/a" : "—")),
+    \`\${can.filter(n => e.st[n] === "✅").length}/\${can.length}\`];
+});
 dv.paragraph(\`**\${rows.length} plugins across \${names.length} devices**\`);
 dv.table(["Plugin", "GitHub", "What it does", ...names, "On"], rows);
 \`\`\`
@@ -110,6 +123,22 @@ dv.table(["Plugin", "GitHub", "What it does", ...names, "On"], rows);
 
 The device shows up here within about 15 seconds of Obsidian starting.
 `;
+
+// History of plugins removed from a device. Devices only ever append rows to the
+// table, so the last column is yours to fill in and is never overwritten.
+const REMOVED_HEADER = '| Plugin | GitHub | What it does | Device | Last version | Removed | Why I removed it |\n|---|---|---|---|---|---|---|';
+const removedText = dashLink => `---
+tags:
+  - device-plugin-census
+census_removed_log: true
+---
+# Removed Plugins
+
+Plugins that were uninstalled from a device. Each device running **Device Plugin Census** adds a row here when a plugin disappears from its plugin list. Fill in *Why I removed it* whenever you like; rows are never rewritten. Back to [[${dashLink}]].
+
+${REMOVED_HEADER}
+`;
+const ghLink = u => !u ? '' : u.includes('github.com/') ? `[${u.replace(/^https:\/\/github\.com\//, '')}](${u})` : `[site](${u})`;
 
 module.exports = class DevicePluginCensus extends Plugin {
   async onload() {
@@ -156,6 +185,45 @@ module.exports = class DevicePluginCensus extends Plugin {
     if (!p.endsWith('.md')) p += '.md';
     return normalizePath(p);
   }
+  removedPath() {
+    let p = (this.settings.removed || '').trim();
+    if (!p) { const dir = this.dashboardPath().split('/').slice(0, -1).join('/'); p = (dir ? dir + '/' : '') + DEFAULT_REMOVED; }
+    if (!p.endsWith('.md')) p += '.md';
+    return normalizePath(p);
+  }
+  // Found by its census_removed_log property, wherever it was moved.
+  findRemovedNote() {
+    const f = this.app.vault.getAbstractFileByPath(this.removedPath());
+    if (f instanceof TFile) return f;
+    return this.app.vault.getMarkdownFiles().find(x => this.app.metadataCache.getFileCache(x)?.frontmatter?.census_removed_log) || null;
+  }
+  findDashboard() {
+    const f = this.app.vault.getAbstractFileByPath(this.dashboardPath());
+    if (f instanceof TFile) return f;
+    return this.app.vault.getMarkdownFiles().find(x => this.app.metadataCache.getFileCache(x)?.frontmatter?.census_dashboard) || null;
+  }
+  linkTo(path) { return path.replace(/\.md$/, ''); }
+
+  async logRemoved(device, gone) {
+    let file = this.findRemovedNote();
+    if (!file) {
+      const path = this.removedPath(), dir = path.split('/').slice(0, -1).join('/');
+      if (dir) await this.ensureFolder(dir);
+      const dash = this.findDashboard();
+      file = await this.app.vault.create(path, removedText(this.linkTo(dash ? dash.path : this.dashboardPath())));
+    }
+    const rows = gone.map(p => `| ${cell(p.name || p.id)}${p.desktop_only ? ' 🖥' : ''} | ${ghLink(p.url)} | ${cell(p.summary)} | ${cell(device)} | ${cell(p.version)} | ${today()} |  |`);
+    await this.app.vault.process(file, text => {
+      const lines = text.replace(/\n+$/, '').split('\n');
+      let last = -1;
+      for (let i = 0; i < lines.length; i++) if (/^\|/.test(lines[i])) last = i;
+      if (last < 0) return lines.join('\n') + '\n\n' + REMOVED_HEADER + '\n' + rows.join('\n') + '\n';
+      lines.splice(last + 1, 0, ...rows);
+      return lines.join('\n') + '\n';
+    });
+    new Notice(`Device Plugin Census: logged ${gone.length} removed plugin${gone.length > 1 ? 's' : ''} in ${file.path}.`, 8000);
+  }
+
   async saveSetting(key, value) {
     if (value) this.settings[key] = value; else delete this.settings[key];
     await this.saveData(this.settings);
@@ -248,7 +316,8 @@ module.exports = class DevicePluginCensus extends Plugin {
     }
     const dir = path.split('/').slice(0, -1).join('/');
     if (dir) await this.ensureFolder(dir);
-    const file = await this.app.vault.create(path, DASHBOARD);
+    const rem = this.findRemovedNote();
+    const file = await this.app.vault.create(path, dashboardText(this.linkTo(rem ? rem.path : this.removedPath())));
     if (!open) { new Notice(`Device Plugin Census: created the dashboard, ${path}.`, 8000); return; }
     await this.app.workspace.getLeaf(true).openFile(file);
     if (!this.app.plugins.enabledPlugins.has('dataview')) {
@@ -338,6 +407,7 @@ module.exports = class DevicePluginCensus extends Plugin {
       enabled: enabled.has(m.id),
       summary: summarize(m.description),
       url: repos[m.id] || brat[m.id] || brat[m.id.replace(/^obsidian-/, '')] || m.authorUrl || '',
+      ...(m.isDesktopOnly ? { desktop_only: true } : {}),
     })).sort((a, b) => a.name.localeCompare(b.name));
 
     const on = plugins.filter(p => p.enabled), off = plugins.filter(p => !p.enabled);
@@ -356,12 +426,13 @@ module.exports = class DevicePluginCensus extends Plugin {
       ...plugins.map(p => '  - ' + JSON.stringify(p)),
     ];
     const table = ps => ['| Plugin | Summary | Version | GitHub |', '|---|---|---|---|',
-      ...ps.map(p => `| ${cell(p.name)} | ${cell(p.summary)} | ${cell(p.version)} | ${p.url ? `[link](${p.url})` : ''} |`)].join('\n');
+      ...ps.map(p => `| ${cell(p.name)}${p.desktop_only ? ' 🖥' : ''} | ${cell(p.summary)} | ${cell(p.version)} | ${p.url ? `[link](${p.url})` : ''} |`)].join('\n');
     const body = [
       `# ${device}`, '',
       `Written automatically by Device Plugin Census on this device. Don't edit by hand: it's rewritten when something changes.`, '',
       `## Enabled (${on.length})`, '', table(on), '',
       `## Installed but off (${off.length})`, '', off.length ? table(off) : '_None._', '',
+      ...(plugins.some(p => p.desktop_only) ? ['🖥 desktop only', ''] : []),
     ].join('\n');
 
     const folder = this.dataFolder();
@@ -372,6 +443,13 @@ module.exports = class DevicePluginCensus extends Plugin {
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) {
       const old = await this.app.vault.read(existing);
+      // Plugins in the last report that are no longer installed go to the history note.
+      const before = this.app.metadataCache.getFileCache(existing)?.frontmatter?.plugins;
+      if (Array.isArray(before) && plugins.length) {
+        const now = new Set(plugins.map(p => p.id));
+        const gone = before.filter(p => p && p.id && !now.has(p.id));
+        if (gone.length) { try { await this.logRemoved(device, gone); } catch (e) { console.error('Device Plugin Census: could not log removed plugins', e); } }
+      }
       const m = old.match(/^last_seen: (.+)$/m);
       const last = m ? m[1].trim() : '';
       const unchanged = last && old === content(last);
@@ -490,6 +568,11 @@ class CensusSettings extends PluginSettingTab {
       .addText(t => t.setPlaceholder(DEFAULT_DASHBOARD).setValue(p.settings.dashboard || '')
         .onChange(v => p.saveSetting('dashboard', v.trim())))
       .addButton(b => b.setButtonText('Create').onClick(() => p.createDashboard()));
+    new Setting(containerEl)
+      .setName('Removed plugins note')
+      .setDesc(`Where plugins removed from a device are logged, with a column for why. Created the first time a removal is seen. Now: ${p.findRemovedNote()?.path || p.removedPath()}`)
+      .addText(t => t.setPlaceholder(p.removedPath()).setValue(p.settings.removed || '')
+        .onChange(v => p.saveSetting('removed', v.trim())));
     new Setting(containerEl)
       .setName('Create the dashboard automatically')
       .setDesc('If no dashboard note exists anywhere in the vault, create one. It is recognised by its census_dashboard property, so renaming or moving it is fine.')

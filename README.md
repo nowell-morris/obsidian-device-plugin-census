@@ -8,6 +8,8 @@ See which plugins are installed and enabled on each of your devices, side by sid
 - **Each device writes its own note** into a data folder (default `Device Plugin Census/`), named after the device: every installed plugin with its version, whether it's enabled, a short summary and its GitHub link. It runs on every start and every 15 minutes while Obsidian is open, and only rewrites the note when something changed (or every 6 hours to refresh `last_seen`). Devices never edit the same file, so sync never conflicts.
 - **A dashboard note compares the devices.** The plugin creates it the first time it runs, at the path in settings (default `Device Plugin Census.md`): a devices table, a "wanted on every device" checklist, and a table of every plugin with one column per device. It needs the **Dataview** plugin with JavaScript queries enabled. It's recognised by its `census_dashboard` property, so you can rename, move and edit it freely; the plugin never overwrites it or makes a second one. (When other devices already report, a newly installed device waits 15 minutes before creating one, so sync can bring the existing dashboard in first.) *Create dashboard note* makes one on demand, and the automatic creation can be turned off.
 - The plugin list is also in each device note's properties (`plugins:`), if you'd rather build your own views.
+- **Desktop-only plugins** are flagged (`desktop_only: true` in the device note, 🖥 on the dashboard). Phones and tablets show *n/a* for them instead of counting them as missing.
+- **Removed plugins are logged.** When a plugin disappears from a device's list, the device appends a row to a *Removed Plugins* note (default next to the dashboard; recognised by its `census_removed_log` property, so it can be moved). The last column, *Why I removed it*, is for you; rows are never rewritten.
 
 ## Settings
 
@@ -16,6 +18,7 @@ See which plugins are installed and enabled on each of your devices, side by sid
 | Device name | on this device only | config folder `.obsidian-<name>`, a `device-plugin-census-name.txt` file in it, the hostname (desktop), or Obsidian Sync's device name |
 | Data folder | plugin settings | the folder other devices already write to, else `Device Plugin Census` |
 | Dashboard note | plugin settings | `Device Plugin Census.md` |
+| Removed plugins note | plugin settings | `Removed Plugins.md` next to the dashboard |
 
 Phones and tablets confirm a device name once, in the setup window. A new device finds an existing data folder by itself, even if plugin settings don't sync.
 
